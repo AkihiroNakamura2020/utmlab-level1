@@ -1,0 +1,6 @@
+{"ts":"2025-11-01T11:56:16.185Z","who":"UASSP_A","msg":"BOOT"}
+{"ts":"2025-11-01T11:57:11.984Z","who":"UASSP_A","msg":"BOOT"}
+{"ts":"2025-11-01T12:01:20.460Z","who":"UASSP_A","msg":"NOTIFY_IN","trace":[{"hop":"UASSP_PEER","name":"UASSP_A","t_peer_in":"2025-11-01T12:01:20.460Z"}]}
+{"ts":"2025-11-01T12:01:20.464Z","who":"UASSP_A","msg":"PLAN_SUBMITTED","flightPlanId":"fp-demo-001"}
+{"ts":"2025-11-01T12:01:31.006Z","who":"UASSP_A","msg":"DEVIATION_DETECTED","tel":{"lat":35,"lon":139,"alt":999,"ts":1730440000000}}
+{"ts":"2025-11-01T12:01:31.013Z","who":"UASSP_A","msg":"NOTIFY_IN","eventId":"evt-1761998491006","trace":[{"hop":"UASSP_ORIGIN","name":"UASSP_A","t_detect":"2025-11-01T12:01:31.006Z"},{"hop":"UASSP_PEER","name":"UASSP_A","t_peer_in":"2025-11-01T12:01:31.013Z"}]}

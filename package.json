@@ -1,0 +1,20 @@
+{
+  "name": "utm-lab",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "fims": "node fims/fims.js",
+    "uasspA": "node uassp/uassp.js --name UASSP_A --port 4001",
+    "uasspB": "node uassp/uassp.js --name UASSP_B --port 4002",
+    "simA": "python3 simulator/sim.py --uassp http://localhost:4001",
+    "simB": "python3 simulator/sim.py --uassp http://localhost:4002",
+    "analyze": "node uassp/uassp.js --analyze"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "axios": "^1.13.1",
+    "express": "^4.19.2",
+    "yargs": "^17.7.2"
+  }
+}

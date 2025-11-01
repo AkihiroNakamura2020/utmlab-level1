@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FlightPlan",
+  "type": "object",
+  "required": ["flightPlanId", "operator", "aircraft", "route", "intent", "safety"],
+  "properties": {
+    "flightPlanId": {"type": "string"},
+    "operator": {
+      "type": "object",
+      "required": ["id","org"],
+      "properties": {"id":{"type":"string"}, "org":{"type":"string"}}
+    },
+    "aircraft": {
+      "type":"object",
+      "required":["uai","rid"],
+      "properties":{"uai":{"type":"string"},"rid":{"type":"string"}}
+    },
+    "route": {
+      "type":"object",
+      "required":["start","end","altMin","altMax","tStart","tEnd"],
+      "properties":{
+        "start":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},
+        "end":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},
+        "altMin":{"type":"number"},
+        "altMax":{"type":"number"},
+        "tStart":{"type":"string","format":"date-time"},
+        "tEnd":{"type":"string","format":"date-time"}
+      }
+    },
+    "intent":{"type":"string"},
+    "safety":{"type":"object"}
+  }
+}
