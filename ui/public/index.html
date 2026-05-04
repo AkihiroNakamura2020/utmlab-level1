@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UTM-LevelL Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      background: #0f1117;
+      color: #c9d1d9;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: bold;
+      color: #58a6ff;
+    }
+
+    #ws-indicator {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: #3c1a1a;
+      color: #f85149;
+    }
+
+    #ws-indicator.connected {
+      background: #1a3c1a;
+      color: #3fb950;
+    }
+
+    .main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      grid-template-rows: 1fr auto;
+      gap: 1px;
+      background: #30363d;
+      overflow: hidden;
+    }
+
+    .panel {
+      background: #0f1117;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-title {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 6px 12px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #8b949e;
+      flex-shrink: 0;
+    }
+
+    /* Active Plans */
+    #plans-wrap {
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    th {
+      background: #161b22;
+      color: #8b949e;
+      padding: 4px 8px;
+      text-align: left;
+      position: sticky;
+      top: 0;
+      border-bottom: 1px solid #30363d;
+    }
+
+    td {
+      padding: 3px 8px;
+      border-bottom: 1px solid #21262d;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 120px;
+    }
+
+    tr:hover td { background: #161b22; }
+
+    /* Event Timeline */
+    #timeline-wrap {
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .evt-row {
+      display: grid;
+      grid-template-columns: 80px 140px 110px 1fr;
+      gap: 6px;
+      padding: 3px 10px;
+      border-bottom: 1px solid #21262d;
+      font-size: 11px;
+      align-items: center;
+    }
+
+    .evt-row:hover { background: #161b22; }
+
+    .evt-type {
+      color: #58a6ff;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .evt-type.REJECTED  { color: #f85149; }
+    .evt-type.COMPLETED { color: #3fb950; }
+    .evt-type.ASSIGNED  { color: #d29922; }
+    .evt-type.FILED     { color: #a5d6ff; }
+    .evt-type.EVENT     { color: #bc8cff; }
+
+    .evt-source { color: #8b949e; }
+    .evt-trace  { color: #6e7681; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* SLA chart area */
+    .sla-panel {
+      grid-column: 1 / -1;
+      background: #0f1117;
+      border-top: 1px solid #30363d;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      flex-shrink: 0;
+    }
+
+    .sla-item { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .sla-label { font-size: 10px; color: #8b949e; }
+    .sla-value { font-size: 18px; font-weight: bold; color: #58a6ff; }
+
+    #histogram {
+      flex: 1;
+      height: 40px;
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
+    .hist-bar {
+      background: #1f6feb;
+      min-width: 6px;
+      border-radius: 2px 2px 0 0;
+    }
+
+    /* Empty state */
+    .empty {
+      padding: 16px;
+      color: #6e7681;
+      font-size: 11px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>UTM-LevelL Dashboard</h1>
+    <span id="ws-indicator">● DISCONNECTED</span>
+  </header>
+
+  <div class="main">
+    <!-- Active Plans -->
+    <div class="panel">
+      <div class="panel-title">Active Plans (<span id="plan-count">0</span>)</div>
+      <div id="plans-wrap">
+        <table id="plans-table">
+          <thead>
+            <tr>
+              <th>flightPlanId</th>
+              <th>who</th>
+              <th>route</th>
+              <th>depart</th>
+              <th>arrive</th>
+            </tr>
+          </thead>
+          <tbody id="plans-body">
+            <tr><td colspan="5" class="empty">No active plans</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Event Timeline -->
+    <div class="panel">
+      <div class="panel-title">Event Timeline (latest <span id="tl-count">0</span>)</div>
+      <div id="timeline-wrap">
+        <div class="evt-row" style="background:#161b22;font-size:10px;color:#8b949e;">
+          <span>time</span><span>type</span><span>source</span><span>traceId / flightPlanId</span>
+        </div>
+        <div id="timeline-body"></div>
+      </div>
+    </div>
+
+    <!-- SLA -->
+    <div class="sla-panel">
+      <div class="sla-item">
+        <span class="sla-label">COUNT</span>
+        <span class="sla-value" id="sla-count">—</span>
+      </div>
+      <div class="sla-item">
+        <span class="sla-label">P50</span>
+        <span class="sla-value" id="sla-p50">—</span>
+      </div>
+      <div class="sla-item">
+        <span class="sla-label">P95</span>
+        <span class="sla-value" id="sla-p95">—</span>
+      </div>
+      <div id="histogram" title="遅延ヒストグラム (ms)"></div>
+    </div>
+  </div>
+
+  <script>
+    // ---- state ----
+    const activePlans = new Map(); // flightPlanId -> { who, route, tcSchedule }
+    const tlRows = [];             // {ts, type, source, traceId, flightPlanId}
+    const slaData = [];            // [{flightPlanId, filedMs, notifyMs, delayMs}]
+
+    // ---- DOM refs ----
+    const wsIndicator = document.getElementById("ws-indicator");
+    const planCount   = document.getElementById("plan-count");
+    const plansBody   = document.getElementById("plans-body");
+    const tlCount     = document.getElementById("tl-count");
+    const tlBody      = document.getElementById("timeline-body");
+    const slaCountEl  = document.getElementById("sla-count");
+    const slaP50El    = document.getElementById("sla-p50");
+    const slaP95El    = document.getElementById("sla-p95");
+    const histogram   = document.getElementById("histogram");
+
+    // ---- WebSocket ----
+    let ws;
+
+    function connect() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}`);
+
+      ws.onopen = () => {
+        wsIndicator.textContent = "● CONNECTED";
+        wsIndicator.classList.add("connected");
+      };
+
+      ws.onclose = () => {
+        wsIndicator.textContent = "● DISCONNECTED";
+        wsIndicator.classList.remove("connected");
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => ws.close();
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "init") {
+            handleInit(msg);
+          } else if (msg.type === "mqtt") {
+            handleMqtt(msg.topic, msg.envelope);
+          }
+        } catch (e) {
+          console.warn("parse error", e);
+        }
+      };
+    }
+
+    function handleInit(msg) {
+      for (const e of (msg.timeline || [])) addTimeline(e);
+      const s = msg.sla || {};
+      updateSlaDisplay(s.count, s.p50, s.p95);
+    }
+
+    function handleMqtt(topic, env) {
+      if (!env) return;
+      const evtType    = env.type || "(unknown)";
+      const traceId    = env.traceId || null;
+      const payload    = env.payload || {};
+      const fpId       = payload.flightPlanId
+                      || payload.subject?.flightPlanId
+                      || env.flightPlanId
+                      || null;
+
+      // タイムライン追加
+      addTimeline({ ts: Date.now(), type: evtType, source: env.source, traceId, flightPlanId: fpId });
+
+      // Active Plans 管理
+      if (evtType === "FLIGHT_PLAN_FILED" && fpId) {
+        const tc = payload.tcSchedule || null;
+        const route = payload.route || {};
+        activePlans.set(fpId, {
+          who: env.source || "?",
+          from: tc?.from || route.start?.join(",") || "?",
+          to:   tc?.to   || route.end?.join(",")   || "?",
+          departMs: tc?.actualDepartAbsMs || null,
+          arriveMs: tc?.arrivalAbsMs      || null,
+        });
+        renderPlans();
+      }
+
+      if (evtType === "FLIGHT_PLAN_COMPLETED" && fpId) {
+        activePlans.delete(fpId);
+        renderPlans();
+      }
+
+      if (evtType === "PLAN_REJECTED" && fpId) {
+        activePlans.delete(fpId);
+        renderPlans();
+      }
+
+      // SLA: Filed 受信時刻記録（utm/events 側）
+      if (evtType === "FLIGHT_PLAN_FILED" && fpId && !topic.startsWith("utm/notify/")) {
+        if (!slaData.find(s => s.flightPlanId === fpId)) {
+          slaData.push({ flightPlanId: fpId, filedMs: Date.now(), notifyMs: null, delayMs: null });
+          if (slaData.length > 200) slaData.shift();
+        }
+      }
+
+      // SLA: Notify 到達時刻記録
+      if (topic.startsWith("utm/notify/") && evtType === "FLIGHT_PLAN_FILED" && fpId) {
+        const rec = slaData.find(s => s.flightPlanId === fpId && s.notifyMs === null);
+        if (rec) {
+          rec.notifyMs = Date.now();
+          rec.delayMs  = rec.notifyMs - rec.filedMs;
+          updateSlaFromBuffer();
+        }
+      }
+    }
+
+    function addTimeline(entry) {
+      tlRows.push(entry);
+      if (tlRows.length > 50) tlRows.shift();
+      renderTimeline();
+    }
+
+    // ---- renderers ----
+    function renderPlans() {
+      planCount.textContent = activePlans.size;
+      if (activePlans.size === 0) {
+        plansBody.innerHTML = '<tr><td colspan="5" class="empty">No active plans</td></tr>';
+        return;
+      }
+      const rows = [];
+      for (const [fpId, p] of activePlans) {
+        const dep = p.departMs ? new Date(p.departMs).toISOString().slice(11, 19) : "—";
+        const arr = p.arriveMs ? new Date(p.arriveMs).toISOString().slice(11, 19) : "—";
+        rows.push(`<tr>
+          <td title="${fpId}">${fpId.slice(0, 14)}</td>
+          <td>${esc(p.who)}</td>
+          <td>${esc(p.from)}→${esc(p.to)}</td>
+          <td>${dep}</td>
+          <td>${arr}</td>
+        </tr>`);
+      }
+      plansBody.innerHTML = rows.join("");
+    }
+
+    function renderTimeline() {
+      tlCount.textContent = tlRows.length;
+      const rows = [];
+      for (let i = tlRows.length - 1; i >= 0; i--) {
+        const e = tlRows[i];
+        const t = new Date(e.ts).toISOString().slice(11, 22);
+        const cls = typeClass(e.type);
+        const sub = e.flightPlanId
+          ? `fp=${e.flightPlanId.slice(0, 16)}`
+          : (e.traceId ? `tr=${e.traceId.slice(0, 16)}` : "");
+        rows.push(`<div class="evt-row">
+          <span>${t}</span>
+          <span class="evt-type ${cls}">${esc(e.type)}</span>
+          <span class="evt-source">${esc(e.source || "")}</span>
+          <span class="evt-trace">${esc(sub)}</span>
+        </div>`);
+      }
+      tlBody.innerHTML = rows.join("");
+    }
+
+    function updateSlaFromBuffer() {
+      const delays = slaData.filter(s => s.delayMs != null).map(s => s.delayMs).sort((a, b) => a - b);
+      const n = delays.length;
+      const p50 = n > 0 ? delays[Math.floor(n * 0.5)]  : null;
+      const p95 = n > 0 ? delays[Math.floor(n * 0.95)] : null;
+      updateSlaDisplay(n, p50, p95);
+    }
+
+    function updateSlaDisplay(count, p50, p95) {
+      slaCountEl.textContent = count != null ? count : "—";
+      slaP50El.textContent   = p50  != null ? `${p50}ms`  : "—";
+      slaP95El.textContent   = p95  != null ? `${p95}ms`  : "—";
+      renderHistogram();
+    }
+
+    function renderHistogram() {
+      const delays = slaData.filter(s => s.delayMs != null).map(s => s.delayMs);
+      if (delays.length === 0) { histogram.innerHTML = ""; return; }
+
+      const bins = 20;
+      const max = Math.max(...delays);
+      const step = max / bins || 1;
+      const counts = Array(bins).fill(0);
+      for (const d of delays) {
+        const i = Math.min(Math.floor(d / step), bins - 1);
+        counts[i]++;
+      }
+      const maxCount = Math.max(...counts);
+      histogram.innerHTML = counts.map(c => {
+        const h = maxCount > 0 ? Math.round((c / maxCount) * 38) + 2 : 2;
+        return `<div class="hist-bar" style="height:${h}px;flex:1" title="${c}"></div>`;
+      }).join("");
+    }
+
+    function typeClass(t) {
+      if (!t) return "";
+      if (t.includes("REJECTED")) return "REJECTED";
+      if (t.includes("COMPLETED")) return "COMPLETED";
+      if (t.includes("ASSIGNED")) return "ASSIGNED";
+      if (t.includes("FILED")) return "FILED";
+      if (t === "EVENT") return "EVENT";
+      return "";
+    }
+
+    function esc(s) {
+      if (!s) return "";
+      return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    connect();
+  </script>
+</body>
+</html>

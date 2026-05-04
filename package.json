@@ -8,13 +8,17 @@
     "uasspB": "node uassp/uassp.js --name UASSP_B --port 4002",
     "simA": "python3 simulator/sim.py --uassp http://localhost:4001",
     "simB": "python3 simulator/sim.py --uassp http://localhost:4002",
-    "analyze": "node uassp/uassp.js --analyze"
+    "analyze": "node uassp/uassp.js --analyze",
+    "sdsp": "node sdsp/sdsp.js",
+    "ui": "node ui/server.js"
   },
   "dependencies": {
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "axios": "^1.13.1",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mqtt": "^5.14.1",
     "yargs": "^17.7.2"
   }
 }
