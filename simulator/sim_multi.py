@@ -141,11 +141,39 @@ def submit_and_complete(uassp_url, plan, flight_idx, label, wait_sec=5.0):
         return result
 
 
-def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path):
+def notify_ui_experiment_start(notify_url, flights, run_id=None):
+    """
+    UIサーバーに実験開始を通知し、expectedTotal を伝える。
+    UIサーバーが未起動でも実験は続行する（エラーは警告のみ）。
+    """
+    expected = flights * 2  # UASSP_A + UASSP_B
+    try:
+        r = requests.post(
+            f"{notify_url}/api/experiment/start",
+            json={
+                "expectedTotal":   expected,
+                "flightsPerUassp": flights,
+                "uasspCount":      2,
+                "runId":           run_id,
+            },
+            timeout=3,
+        )
+        r.raise_for_status()
+        print(f"  UI通知完了: expected={expected}便 (--flights {flights} × 2)")
+    except Exception as e:
+        print(f"  UI通知スキップ（UIサーバー未起動 or 到達不可）: {e}")
+
+
+def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path, notify_ui=None, run_id=None):
     print(f"=== 実験開始: {flights}機 {interval}秒間隔 / 完了待機 {wait_sec}秒 ===")
     print(f"  UASSP_A: {uassp_a}")
     print(f"  UASSP_B: {uassp_b}")
+    print(f"  期待総便数: {flights * 2}（A×{flights} + B×{flights}）")
     print(f"  出力: {out_path}")
+
+    # UIサーバーに実験開始を通知（expectedTotal を渡す）
+    if notify_ui:
+        notify_ui_experiment_start(notify_ui, flights, run_id)
 
     os.makedirs(os.path.dirname(out_path) if os.path.dirname(out_path) else ".", exist_ok=True)
 
@@ -210,20 +238,26 @@ def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path):
 
 def main():
     ap = argparse.ArgumentParser(description="UTM 比較実験スクリプト")
-    ap.add_argument("--flights",   type=int,   default=5,
-                    help="フライト数（UASSP_A + B それぞれに申請）")
-    ap.add_argument("--interval",  type=float, default=2.0,
+    ap.add_argument("--flights",    type=int,   default=5,
+                    help="フライト数（UASSP_A + B それぞれに申請。総便数 = N×2）")
+    ap.add_argument("--interval",   type=float, default=2.0,
                     help="フライト送信間隔(秒)")
-    ap.add_argument("--wait",      type=float, default=5.0,
-                    help="申請後 /api/completed を呼ぶまでの待機時間(秒)。"
-                         "FIMS の ASSIGNED→FILED サイクルより長く設定すること")
-    ap.add_argument("--uassp-a",   default="http://localhost:4001",
+    ap.add_argument("--wait",       type=float, default=5.0,
+                    help="申請後 /api/completed を呼ぶまでの待機時間(秒)")
+    ap.add_argument("--uassp-a",    default="http://localhost:4001",
                     help="UASSP_A の URL")
-    ap.add_argument("--uassp-b",   default="http://localhost:4002",
+    ap.add_argument("--uassp-b",    default="http://localhost:4002",
                     help="UASSP_B の URL")
-    ap.add_argument("--out",       default="results/experiment.csv",
+    ap.add_argument("--notify-ui",  default="http://localhost:8080",
+                    help="UIサーバーURL（実験開始通知 + expectedTotal 送信先）")
+    ap.add_argument("--run-id",     default=None,
+                    help="実験ID（省略時は env/dev.env の RUN_ID を使用）")
+    ap.add_argument("--out",        default="results/experiment.csv",
                     help="CSV 出力先パス")
     args = ap.parse_args()
+
+    import os
+    run_id = args.run_id or os.environ.get("RUN_ID", None)
 
     run_experiment(
         flights=args.flights,
@@ -232,6 +266,8 @@ def main():
         uassp_a=args.uassp_a,
         uassp_b=args.uassp_b,
         out_path=args.out,
+        notify_ui=args.notify_ui,
+        run_id=run_id,
     )
 
 

@@ -112,7 +112,9 @@ table.sla td{padding:3px 8px;border-bottom:1px solid var(--bd)}
   <h1>UTM-LevelL Dashboard</h1>
   <span id="ws-status">● DISCONNECTED</span>
   <span class="sep">|</span>
-  <span class="hstat">total <b id="hs-total">0</b></span>
+  <span class="hstat">captured <b id="hs-captured">0</b> / <b id="hs-expected">?</b></span>
+  <span class="hstat" id="hs-rate" style="color:var(--dim)"></span>
+  <span class="sep">|</span>
   <span class="hstat">active <b id="hs-active">0</b></span>
   <span class="hstat">completed <b id="hs-completed">0</b></span>
   <span class="hstat">rejected <b id="hs-rejected">0</b></span>
@@ -205,15 +207,40 @@ table.sla td{padding:3px 8px;border-bottom:1px solid var(--bd)}
       <div style="font-size:10px;color:var(--dim);margin-top:3px">最新サンプル（左が古い）</div>
     </div>
 
+    <div class="ph">Improvement Hints</div>
+    <div id="hints-body" style="padding:6px 10px;font-size:10px;line-height:1.6;max-height:120px;overflow-y:auto">
+      <span style="color:var(--dim)">— 実験後に自動判定 —</span>
+    </div>
+
+    <div class="ph">Rejected Flights <span class="badge" id="rjt-count">0</span></div>
+    <div style="max-height:130px;overflow-y:auto" id="rjt-body">
+      <div class="empty">—</div>
+    </div>
+
     <div class="ph">System Notes</div>
-    <div style="padding:8px 10px;font-size:10px;color:var(--muted);line-height:1.6" id="notes">
-      P50 = 中央値（通常の速度）<br>
-      P95 = 95%点（ほぼ最悪ケース）<br>
-      REQ→ASGN = TC/SDSP処理時間<br>
+    <div style="padding:8px 10px;font-size:10px;color:var(--muted);line-height:1.7;overflow-y:auto;flex:1">
+      <b style="color:var(--text)">SLA フェーズ</b><br>
+      REQ→ASGN &nbsp;= TC+SDSP処理時間<br>
       ASGN→FILED = UASSP往復時間<br>
-      FILED→NOTIFY = FIMS衝突判定+通知<br>
-      REQ→DONE = フライト総時間<br>
-      <span style="color:var(--yellow)">⚠ WARN</span> = reject せず activePlans に積む
+      FILED→NOTIFY = FIMS判定+peer通知<br>
+      REQ→DONE &nbsp;= フライト総時間<br>
+      <br>
+      <b style="color:var(--text)">イベント種別</b><br>
+      EV:CONFLICT_GUARD = segment重複検知<br>
+      EV:TAC_DECONFLICT = 飛行逸脱検知<br>
+      <span style="color:var(--yellow)">⚠ WARN</span> = reject せず通過<br>
+      <br>
+      <b style="color:var(--text)">Reject 理由</b><br>
+      TC_REJECT &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= TCルート計算失敗<br>
+      GEOFENCE_BLOCKED &nbsp;= No-Fly Zone侵入<br>
+      FILED_WITHOUT_PENDING = ASSIGNED前にFILED<br>
+      FILED_AFTER_TIMEOUT &nbsp;= ASSIGNED期限切れ<br>
+      SEGMENT_CONFLICT &nbsp;&nbsp;= segment衝突(reject時)<br>
+      <br>
+      <b style="color:var(--text)">total の意味</b><br>
+      UIサーバー補足済みtrace数<br>
+      再起動前・MQTT未着分は含まない<br>
+      --flights N → N×2便（A+B）
     </div>
   </div>
 
@@ -222,12 +249,14 @@ table.sla td{padding:3px 8px;border-bottom:1px solid var(--bd)}
 <script>
 // ── State ──
 const state = {
-  activePlans:  new Map(),   // fpId → plan
-  traces:       new Map(),   // traceId → trace
-  conflicts:    [],
-  rejectReasons:{},
-  timeline:     [],
-  stats:        { total:0, active:0, completed:0, rejected:0 },
+  activePlans:   new Map(),
+  traces:        new Map(),
+  rejectedTraces:[],
+  conflicts:     [],
+  rejectReasons: {},
+  timeline:      [],
+  experiment:    { expectedTotal:0, observedTotal:0, missingTotal:null, captureRate:null },
+  stats:         { observed:0, expected:0, active:0, completed:0, rejected:0 },
 };
 
 // SLA サンプル蓄積（sparkline用）
@@ -265,10 +294,12 @@ function handleInit(msg) {
   (msg.activePlans || []).forEach(p => state.activePlans.set(p.fpId, p));
   state.traces.clear();
   (msg.traces || []).forEach(t => state.traces.set(t.traceId, t));
-  state.conflicts    = msg.conflicts    || [];
-  state.rejectReasons= msg.rejectReasons|| {};
-  state.timeline     = msg.timeline     || [];
-  state.stats        = msg.stats        || state.stats;
+  state.conflicts     = msg.conflicts      || [];
+  state.rejectReasons = msg.rejectReasons  || {};
+  state.rejectedTraces= msg.rejectedTraces || [];
+  state.timeline      = msg.timeline       || [];
+  state.experiment    = msg.experiment     || state.experiment;
+  state.stats         = msg.stats          || state.stats;
   renderAll();
 }
 
@@ -295,11 +326,16 @@ function handleMqtt(msg) {
   // conflict
   if (msg.conflictAdd) { state.conflicts.push(msg.conflictAdd); renderConflicts(); }
   // SLA
-  if (msg.sla) renderSla(msg.sla);
+  if (msg.sla) { renderSla(msg.sla); renderHints(msg.sla, state.experiment); }
   // reject
   if (msg.rejectReasons) { state.rejectReasons = msg.rejectReasons; renderRejectReasons(); }
+  if (msg.rejectedTraces){ state.rejectedTraces = msg.rejectedTraces; renderRejectedTraces(); }
+  // experiment
+  if (msg.experiment) { state.experiment = msg.experiment; renderStats(); renderHints(null, msg.experiment); }
   // stats
   if (msg.stats) { state.stats = msg.stats; renderStats(); }
+  // experiment_started → 全状態リセット表示
+  if (msg.type === "experiment_started") { renderAll(); }
 }
 
 // ── Render all ──
@@ -309,16 +345,36 @@ function renderAll() {
   renderConflicts();
   renderSla(null);
   renderRejectReasons();
+  renderRejectedTraces();
   renderTraceLog();
   renderStats();
+  renderHints(null, state.experiment);
 }
 
 function renderStats() {
-  const s = state.stats;
-  $("hs-total").textContent     = s.total     || 0;
+  const s  = state.stats;
+  const ex = state.experiment;
+  const observed = s.observed ?? state.traces.size;
+  const expected = ex?.expectedTotal || s.expected || 0;
+
+  $("hs-captured").textContent  = observed;
+  $("hs-expected").textContent  = expected || "?";
   $("hs-active").textContent    = s.active    || state.activePlans.size;
   $("hs-completed").textContent = s.completed || 0;
   $("hs-rejected").textContent  = s.rejected  || 0;
+
+  // capture率と missing 件数
+  const rateEl = $("hs-rate");
+  if (expected) {
+    const rate    = Math.round(observed / expected * 100);
+    const missing = Math.max(0, expected - observed);
+    const color   = rate < 80 ? "var(--red)" : rate < 100 ? "var(--yellow)" : "var(--green)";
+    rateEl.innerHTML = `<span style="color:${color}">${rate}%</span>` +
+      (missing > 0 ? ` <span style="color:var(--red)">miss:${missing}</span>` : "");
+  } else {
+    rateEl.textContent = "";
+  }
+
   const cf = state.conflicts.length;
   $("hs-cf").textContent = cf > 0 ? `⚠ conflicts: ${cf}` : "";
 }
@@ -376,7 +432,12 @@ function prependTimelineRow(entry) {
 
 function rowHtml(e) {
   const t   = fmtMs(e.ts);
-  const typ = e.type.replace("FLIGHT_PLAN_","FP_");
+  // EVENT は subtype を付加（例: "EV:CONFLICT_GUARD"）で何が起きたか一目瞭然に
+  let typ = e.type.replace("FLIGHT_PLAN_","FP_");
+  if (e.type === "EVENT" && e.eventSubtype) {
+    const sub2 = e.eventSubtype.replace("SEGMENT_CONFLICT_","CONFLICT_").replace("TACTICAL_","TAC_");
+    typ = `EV:${sub2}`;
+  }
   const cls = typeClass(e.type);
   const sub = e.flightPlanId ? e.flightPlanId.slice(-12)
             : (e.traceId     ? e.traceId.slice(3, 15) : "");
@@ -489,10 +550,12 @@ function renderSla(sla) {
 function renderSparkline() {
   const el = $("sparkline");
   if (!slaFiledNotifySamples.length) { el.innerHTML=""; return; }
-  const max = Math.max(...slaFiledNotifySamples, 1);
+  const maxV = Math.max(...slaFiledNotifySamples, 1);
   el.innerHTML = slaFiledNotifySamples.map(v => {
-    const h = Math.max(3, Math.round(v / max * 44));
-    const c = v > max * 0.8 ? "var(--red)" : v > max * 0.5 ? "var(--yellow)" : "var(--green)";
+    const h = Math.max(3, Math.round(v / maxV * 44));
+    // 絶対閾値で色付け（相対比較だと全値が近いと全部赤になる問題を解消）
+    // UTM想定: <5ms=優良, 5-20ms=許容, >20ms=要注意
+    const c = v > 20 ? "var(--red)" : v > 5 ? "var(--yellow)" : "var(--green)";
     return `<div style="flex:1;height:${h}px;background:${c};border-radius:1px 1px 0 0;min-width:4px" title="${v}ms"></div>`;
   }).join("");
 }
@@ -511,6 +574,97 @@ function renderRejectReasons() {
     </div>`).join("");
 }
 
+// ── Improvement Hints ──
+function renderHints(sla, ex) {
+  const el = $("hints-body");
+  if (!el) return;
+  // sla は null の場合は現在 state から取得
+  const s = sla || state._lastSla;
+  if (sla) state._lastSla = sla;
+  const exp = ex || state.experiment;
+
+  const hints = [];
+
+  // capture率チェック
+  if (exp?.expectedTotal) {
+    const rate = exp.captureRate ?? Math.round((exp.observedTotal || 0) / exp.expectedTotal * 100);
+    if (rate < 100) {
+      const miss = exp.missingTotal ?? Math.max(0, exp.expectedTotal - (exp.observedTotal || 0));
+      hints.push({ lv:"err", msg:`補足漏れ ${miss}便 (capture ${rate}%): UIサーバー起動順・MQTT subscribe timingを確認` });
+    } else {
+      hints.push({ lv:"ok", msg:`全${exp.expectedTotal}便を補足 (capture 100%)` });
+    }
+  }
+
+  if (s) {
+    if (s.reqToAsgn?.p95 > 200)
+      hints.push({ lv:"warn", msg:`REQ→ASGN P95=${s.reqToAsgn.p95}ms: TC/SDSP処理が遅延。TC負荷・SDSP応答を確認` });
+    if (s.asgnToFiled?.p95 > 200)
+      hints.push({ lv:"warn", msg:`ASGN→FILED P95=${s.asgnToFiled.p95}ms: UASSP処理遅延。MQTT送信順・HTTP latencyを確認` });
+    if (s.filedToNotify?.p95 > 20)
+      hints.push({ lv:"warn", msg:`FILED→NOTIFY P95=${s.filedToNotify.p95}ms: FIMS判定+署名+notifyが遅延` });
+    if (s.reqToDone?.p95 && s.reqToDone.p95 < 100)
+      hints.push({ lv:"warn", msg:`REQ→DONE P95=${s.reqToDone.p95}ms: --wait が短すぎる可能性。ACTIVE_ADD数を確認` });
+    if (s.reqToReject?.count > 0)
+      hints.push({ lv:"info", msg:`拒否 ${s.reqToReject.count}便: Rejected Flights パネルで理由を確認` });
+  }
+
+  const cfCount = state.conflicts.length;
+  if (cfCount > 0)
+    hints.push({ lv:"info", msg:`segment conflict ${cfCount}件: SEGMENT_GUARD_MODE=warn で通過中（rejectにする場合は env変更）` });
+
+  if (!hints.length) {
+    el.innerHTML = '<span style="color:var(--dim)">— 実験後に自動判定 —</span>';
+    return;
+  }
+
+  const icon = { ok:"✅", warn:"⚠", err:"❌", info:"ℹ" };
+  const col  = { ok:"var(--green)", warn:"var(--yellow)", err:"var(--red)", info:"var(--blue)" };
+  el.innerHTML = hints.map(h =>
+    `<div style="color:${col[h.lv]};margin-bottom:2px">${icon[h.lv]} ${esc(h.msg)}</div>`
+  ).join("");
+}
+
+// ── Rejected Flights（trace単位の拒否一覧）──
+const REASON_SHORT = {
+  TC_REJECT:                   "TCルート計算失敗",
+  TC_ROUTE_GEO_MAPPING_FAILED: "座標→ノード変換失敗",
+  TC_ROUTE_GEO_INPUT_INPUT_INVALID: "座標値不正",
+  TC_ERROR:                    "TC通信エラー",
+  GEOFENCE_BLOCKED:            "No-Fly Zone侵入",
+  FILED_WITHOUT_PENDING:       "ASSIGNED未取得でFILED",
+  FILED_AFTER_TIMEOUT:         "ASSIGNED期限切れ後FILED",
+  FILED_TIMEOUT:               "ASSIGNED→FILEDタイムアウト",
+  SEGMENT_CONFLICT_GUARD:      "segment衝突(rejectモード)",
+  SEMANTIC_ERROR:              "意味検証エラー",
+  MISSING_TC_SCHEDULE:         "tcSchedule欠損",
+};
+
+function renderRejectedTraces() {
+  const el  = $("rjt-body");
+  const cnt = $("rjt-count");
+  const list = state.rejectedTraces || [];
+  cnt.textContent = list.length;
+  if (!list.length) { el.innerHTML = '<div class="empty">—</div>'; return; }
+
+  el.innerHTML = list.slice(0, 20).map(tr => {
+    const t   = tr.rejectedMs ? fmtMs(tr.rejectedMs).slice(0,8) : "—";
+    const lat = tr.requestMs && tr.rejectedMs ? `${tr.rejectedMs - tr.requestMs}ms` : "—";
+    const fp  = tr.fpId ? tr.fpId.slice(-10) : '<span style="color:var(--dim)">(未捕捉)</span>';
+    const rsn = REASON_SHORT[tr.reason] || tr.reason || "?";
+    const sel = tr.traceId === selectedTraceId ? " sel" : "";
+    return `<div class="tr-row${sel}" onclick="selectTrace(${q(tr.traceId)})" title="${esc(tr.reason)}">
+      <span>${t}</span>
+      <span class="trunc">${fp}</span>
+      <span class="trunc" style="color:var(--red)">${esc(tr.reason?.slice(0,12)||"?")}</span>
+      <span style="color:var(--muted)">${lat}</span>
+    </div>
+    <div style="padding:0 8px 3px;font-size:10px;color:var(--dim);border-bottom:1px solid var(--bd)">
+      ${esc(rsn)} | from: ${esc(tr.source||"?")}
+    </div>`;
+  }).join("");
+}
+
 // ── Conflicts ──
 function renderConflicts() {
   const el = $("cf-body");
@@ -524,9 +678,10 @@ function renderConflicts() {
       ).join(" ");
       return `vs <b>${esc(x.fpId?.slice(-8)||x.who||"?")}</b> ${edges}`;
     }).join(" | ");
+    const fpDisp = c.fpId && c.fpId !== "(unknown)" ? c.fpId.slice(-10) : "(fp不明)";
     return `<div class="cf" onclick="selectTrace(${q(c.traceId)})">
-      <span class="cf-hd">⚠ ${t} ${esc(c.fpId?.slice(-10))}</span><br>
-      <span style="color:var(--muted)">${vs}</span>
+      <span class="cf-hd">⚠ ${t} ${esc(fpDisp)} [${esc(c.who||"?")}]</span><br>
+      <span style="color:var(--muted)">${vs || "(conflict詳細なし)"}</span>
     </div>`;
   }).join("");
 }
@@ -546,7 +701,7 @@ function renderTraceLog() {
     const sel = tr.traceId === selectedTraceId ? " sel" : "";
     return `<div class="tr-row${sel}" onclick="selectTrace(${q(tr.traceId)})">
       <span>${t}</span>
-      <span class="trunc" title="${esc(tr.fpId)}">${esc(tr.fpId?.slice(-10)||"—")}</span>
+      <span class="trunc" title="${esc(tr.fpId)||"REQUESTを未捕捉"}">${esc(tr.fpId?.slice(-10))||'<span style="color:var(--dim)">(未捕捉)</span>'}</span>
       <span class="trunc" style="color:var(--muted)">${esc(tr.source?.slice(-8)||"")}</span>
       <span>${dot} ${esc(lat)}</span>
     </div>`;

@@ -33,6 +33,19 @@ const MAX_TRACES    = 500;
 const MAX_CONFLICTS = 50;
 
 /**
+ * 実験メタデータ。
+ * sim_multi.py が POST /api/experiment/start で通知する。
+ * 環境変数 EXPECTED_FLIGHTS をフォールバックとして使う。
+ */
+let experiment = {
+  expectedTotal:    Number(process.env.EXPECTED_FLIGHTS || 0),
+  flightsPerUassp:  0,
+  uasspCount:       2,
+  startedAt:        null,
+  runId:            null,
+};
+
+/**
  * traceId に対応する TraceRec を取得または新規作成する。
  * @param {string|null} traceId
  * @param {string|null} fpId
@@ -123,15 +136,27 @@ function computeSla() {
  */
 function currentState() {
   const allTraces = [...traces.values()];
+  const observed  = traces.size;
+  const expected  = experiment.expectedTotal;
   return {
-    activePlans:  [...activePlans.values()],
-    traces:       allTraces.slice(-100),
-    sla:          computeSla(),
+    activePlans:   [...activePlans.values()],
+    traces:        allTraces.slice(-100),
+    rejectedTraces: allTraces.filter(t => t.rejectedMs)
+                             .sort((a, b) => b.rejectedMs - a.rejectedMs)
+                             .slice(0, 30),
+    sla:           computeSla(),
     rejectReasons: { ...rejectReasons },
-    conflicts:    conflictLog.slice(-20),
-    timeline:     timeline.slice(-50),
+    conflicts:     conflictLog.slice(-20),
+    timeline:      timeline.slice(-50),
+    experiment: {
+      ...experiment,
+      observedTotal: observed,
+      missingTotal:  expected ? Math.max(0, expected - observed) : null,
+      captureRate:   expected ? Math.round(observed / expected * 100) : null,
+    },
     stats: {
-      total:     traces.size,
+      observed,
+      expected,
       active:    activePlans.size,
       completed: allTraces.filter(t => t.completedMs).length,
       rejected:  allTraces.filter(t => t.rejectedMs).length,
@@ -141,8 +166,35 @@ function currentState() {
 
 // --- Express + HTTP + WebSocket ---
 const app = express();
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/api/status", (_req, res) => res.json(currentState()));
+
+/**
+ * 実験開始通知エンドポイント。
+ * sim_multi.py が実験開始前に POST して expectedTotal を UIサーバーに伝える。
+ * 受信時に前実験の traces / activePlans / conflicts / timeline をリセットする。
+ */
+app.post("/api/experiment/start", (req, res) => {
+  const { expectedTotal, flightsPerUassp, uasspCount, runId } = req.body || {};
+  experiment = {
+    expectedTotal:   Number(expectedTotal || 0),
+    flightsPerUassp: Number(flightsPerUassp || 0),
+    uasspCount:      Number(uasspCount || 2),
+    startedAt:       Date.now(),
+    runId:           runId || null,
+  };
+  // 前実験の状態をリセット
+  traces.clear();
+  activePlans.clear();
+  conflictLog.length = 0;
+  timeline.length = 0;
+  Object.keys(rejectReasons).forEach(k => delete rejectReasons[k]);
+
+  console.log(`[UI] experiment/start: expected=${experiment.expectedTotal} flights`);
+  broadcast({ type: "experiment_started", experiment: currentState().experiment });
+  res.json({ ok: true, experiment });
+});
 
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
@@ -184,8 +236,9 @@ mqttClient.on("message", (topic, msgBuf) => {
   const fpId    = extractFpId(envelope);
   const payload = envelope?.payload || {};
 
-  // タイムライン更新
-  const entry = { ts: now, topic, type: evtType, source: src, traceId, flightPlanId: fpId };
+  // タイムライン更新（EVENT は subtype を付加して不明瞭さを解消）
+  const eventSubtype = (evtType === "EVENT" && payload?.type) ? payload.type : null;
+  const entry = { ts: now, topic, type: evtType, eventSubtype, source: src, traceId, flightPlanId: fpId };
   timeline.push(entry);
   if (timeline.length > MAX_TIMELINE) timeline.shift();
 
@@ -284,13 +337,18 @@ mqttClient.on("message", (topic, msgBuf) => {
           })),
         })),
       };
-      conflictLog.push(conf);
-      if (conflictLog.length > MAX_CONFLICTS) conflictLog.shift();
-      conflictAdd = conf;
+      // 同一 fpId の conflict を短時間に重複 push しない（notifyPeers が全peer分送るため）
+      const recent = conflictLog.find(c => c.fpId === conf.fpId && now - c.ts < 2000);
+      if (!recent) {
+        conflictLog.push(conf);
+        if (conflictLog.length > MAX_CONFLICTS) conflictLog.shift();
+        conflictAdd = conf;
+      }
     }
   }
 
   // ブラウザへブロードキャスト
+  const snap = currentState();
   broadcast({
     type: "mqtt",
     entry,
@@ -298,9 +356,11 @@ mqttClient.on("message", (topic, msgBuf) => {
     planAdd,
     planRemove,
     conflictAdd,
-    sla:          computeSla(),
-    rejectReasons: { ...rejectReasons },
-    stats:        currentState().stats,
+    sla:            snap.sla,
+    rejectReasons:  snap.rejectReasons,
+    rejectedTraces: snap.rejectedTraces,
+    experiment:     snap.experiment,
+    stats:          snap.stats,
   });
 });
 
