@@ -1,11 +1,11 @@
 /**
- * ui/server.js
- * MQTT → WebSocket ブリッジ + UTM ダッシュボード配信
+ * ui/server.js - UTM Dashboard: MQTT→WebSocket bridge + state tracking
  *
- * - utm/events を購読してブラウザへ転送
- * - utm/notify/# を購読してブラウザへ転送
- * - GET /api/status で activePlans / peers の現在状態を返す
- * - 静的ファイル（ui/public/）を配信
+ * 4フェーズ SLA 計測:
+ *   REQUEST → ASSIGNED (TC+SDSP処理)
+ *   ASSIGNED → FILED   (UASSP往復)
+ *   FILED → NOTIFY     (FIMS衝突判定+署名+通知)
+ *   REQUEST → DONE     (フライト総時間)
  */
 
 import express from "express";
@@ -18,56 +18,147 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = process.env.UI_PORT || 8080;
+const PORT       = process.env.UI_PORT    || 8080;
 const BROKER_URL = process.env.BROKER_URL || "mqtt://localhost:1883";
 
-// ブラウザへ転送するMQTTトピック
-const WATCH_TOPICS = ["utm/events", "utm/notify/#"];
+// --- State ---
+const traces      = new Map(); // traceId → TraceRec
+const activePlans = new Map(); // fpId    → PlanRec
+const rejectReasons = {};      // reason  → count
+const conflictLog   = [];      // 最新 MAX_CONFLICTS 件
+const timeline      = [];      // 最新 MAX_TIMELINE 件
 
-// SLA 計測用（最新実験分のみ保持）
-const slaBuffer = []; // { flightPlanId, filedMs, notifyMs, delayMs }
-const MAX_SLA = 200;
+const MAX_TIMELINE  = 100;
+const MAX_TRACES    = 500;
+const MAX_CONFLICTS = 50;
 
-// タイムライン（最新50件）
-const timeline = [];
-const MAX_TIMELINE = 50;
+/**
+ * traceId に対応する TraceRec を取得または新規作成する。
+ * @param {string|null} traceId
+ * @param {string|null} fpId
+ * @param {string|null} source
+ * @returns {object|null}
+ */
+function ensureTrace(traceId, fpId, source) {
+  if (!traceId) return null;
+  if (!traces.has(traceId)) {
+    if (traces.size >= MAX_TRACES) traces.delete(traces.keys().next().value);
+    traces.set(traceId, {
+      traceId,
+      fpId:        null,
+      source:      null,
+      requestMs:   null,
+      assignedMs:  null,
+      filedMs:     null,
+      notifyMs:    null,
+      completedMs: null,
+      rejectedMs:  null,
+      reason:      null,
+      done:        false,
+    });
+  }
+  const tr = traces.get(traceId);
+  if (fpId   && !tr.fpId)   tr.fpId   = fpId;
+  if (source && !tr.source) tr.source = source;
+  return tr;
+}
 
-// --- Express + HTTP + WebSocket セットアップ ---
+/**
+ * envelope から flightPlanId を抽出する。
+ * @param {object} envelope
+ * @returns {string|null}
+ */
+function extractFpId(envelope) {
+  const p = envelope?.payload || {};
+  return p.flightPlanId
+      || p.subject?.flightPlanId
+      || envelope?.flightPlanId
+      || null;
+}
+
+/**
+ * 配列の統計値（count / min / avg / p50 / p95 / max）を計算する。
+ * @param {number[]} arr
+ * @returns {object|null}
+ */
+function statsOf(arr) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const n = s.length;
+  return {
+    count: n,
+    min:   s[0],
+    avg:   Math.round(s.reduce((a, b) => a + b, 0) / n),
+    p50:   s[Math.floor(n * 0.5)],
+    p95:   s[Math.floor(n * 0.95)],
+    max:   s[n - 1],
+  };
+}
+
+/**
+ * traces から全4フェーズの SLA を計算して返す。
+ * @returns {object}
+ */
+function computeSla() {
+  const reqToAsgn = [], asgnToFiled = [], filedToNotify = [], reqToDone = [], reqToReject = [];
+  for (const tr of traces.values()) {
+    if (tr.requestMs  && tr.assignedMs)  reqToAsgn.push(tr.assignedMs  - tr.requestMs);
+    if (tr.assignedMs && tr.filedMs)     asgnToFiled.push(tr.filedMs   - tr.assignedMs);
+    if (tr.filedMs    && tr.notifyMs)    filedToNotify.push(tr.notifyMs - tr.filedMs);
+    if (tr.requestMs  && tr.completedMs) reqToDone.push(tr.completedMs - tr.requestMs);
+    if (tr.requestMs  && tr.rejectedMs)  reqToReject.push(tr.rejectedMs - tr.requestMs);
+  }
+  return {
+    reqToAsgn:     statsOf(reqToAsgn),
+    asgnToFiled:   statsOf(asgnToFiled),
+    filedToNotify: statsOf(filedToNotify),
+    reqToDone:     statsOf(reqToDone),
+    reqToReject:   statsOf(reqToReject),
+  };
+}
+
+/**
+ * 現在の全状態スナップショットを返す（/api/status + WS init で使用）。
+ * @returns {object}
+ */
+function currentState() {
+  const allTraces = [...traces.values()];
+  return {
+    activePlans:  [...activePlans.values()],
+    traces:       allTraces.slice(-100),
+    sla:          computeSla(),
+    rejectReasons: { ...rejectReasons },
+    conflicts:    conflictLog.slice(-20),
+    timeline:     timeline.slice(-50),
+    stats: {
+      total:     traces.size,
+      active:    activePlans.size,
+      completed: allTraces.filter(t => t.completedMs).length,
+      rejected:  allTraces.filter(t => t.rejectedMs).length,
+    },
+  };
+}
+
+// --- Express + HTTP + WebSocket ---
 const app = express();
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/api/status", (_req, res) => res.json(currentState()));
 
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
-/**
- * 接続中のブラウザ全員へメッセージを送る。
- *
- * @param {object} msg - JSON シリアライズ可能なオブジェクト
- */
 function broadcast(msg) {
   const payload = JSON.stringify(msg);
-  for (const client of wss.clients) {
-    if (client.readyState === 1 /* OPEN */) {
-      client.send(payload);
-    }
-  }
+  for (const c of wss.clients) if (c.readyState === 1) c.send(payload);
 }
 
-// --- GET /api/status ---
-app.get("/api/status", (_req, res) => {
-  // SLA P50/P95
-  const delays = slaBuffer.map((s) => s.delayMs).sort((a, b) => a - b);
-  const n = delays.length;
-  const p50 = n > 0 ? delays[Math.floor(n * 0.5)] : null;
-  const p95 = n > 0 ? delays[Math.floor(n * 0.95)] : null;
-
-  res.json({
-    sla: { count: n, p50, p95 },
-    timeline: timeline.slice(-50),
-  });
+wss.on("connection", (ws) => {
+  console.log("[UI] browser connected");
+  ws.send(JSON.stringify({ type: "init", ...currentState() }));
+  ws.on("error", (e) => console.error("[UI WS ERROR]", e.message));
 });
 
-// --- MQTT 接続 ---
+// --- MQTT ---
 const mqttClient = mqtt.connect(BROKER_URL, {
   clientId: "UTM_UI_BRIDGE",
   reconnectPeriod: 2000,
@@ -75,85 +166,144 @@ const mqttClient = mqtt.connect(BROKER_URL, {
 
 mqttClient.on("connect", () => {
   console.log(`[UI] MQTT connected: ${BROKER_URL}`);
-  for (const topic of WATCH_TOPICS) {
-    mqttClient.subscribe(topic);
-    console.log(`[UI] subscribed: ${topic}`);
+  for (const t of ["utm/events", "utm/notify/#"]) {
+    mqttClient.subscribe(t);
+    console.log(`[UI] subscribed: ${t}`);
   }
 });
-
 mqttClient.on("error", (e) => console.error("[UI MQTT ERROR]", e.message));
 
 mqttClient.on("message", (topic, msgBuf) => {
   let envelope;
-  try {
-    envelope = JSON.parse(msgBuf.toString("utf8"));
-  } catch {
-    return;
-  }
+  try { envelope = JSON.parse(msgBuf.toString("utf8")); } catch { return; }
 
-  const evtType = envelope?.type || "(unknown)";
+  const now     = Date.now();
+  const evtType = envelope?.type  || "(unknown)";
   const traceId = envelope?.traceId || null;
-  const fpId =
-    envelope?.payload?.flightPlanId ||
-    envelope?.payload?.subject?.flightPlanId ||
-    envelope?.flightPlanId ||
-    null;
+  const src     = envelope?.source  || null;
+  const fpId    = extractFpId(envelope);
+  const payload = envelope?.payload || {};
 
   // タイムライン更新
-  const entry = {
-    ts: Date.now(),
-    topic,
-    type: evtType,
-    source: envelope?.source || null,
-    traceId,
-    flightPlanId: fpId,
-  };
+  const entry = { ts: now, topic, type: evtType, source: src, traceId, flightPlanId: fpId };
   timeline.push(entry);
   if (timeline.length > MAX_TIMELINE) timeline.shift();
 
-  // SLA: FLIGHT_PLAN_FILED の受信時刻を記録
-  if (evtType === "FLIGHT_PLAN_FILED" && fpId) {
-    const existing = slaBuffer.find((s) => s.flightPlanId === fpId);
-    if (!existing) {
-      slaBuffer.push({ flightPlanId: fpId, filedMs: Date.now(), notifyMs: null, delayMs: null });
-      if (slaBuffer.length > MAX_SLA) slaBuffer.shift();
+  const tr = ensureTrace(traceId, fpId, src);
+
+  // インクリメンタル更新用
+  let traceUpdate = null;
+  let planAdd     = null;
+  let planRemove  = null;
+  let conflictAdd = null;
+
+  // --- utm/events (UASSP→FIMS) ---
+  if (topic === "utm/events") {
+    if (evtType === "FLIGHT_PLAN_REQUEST" && tr && !tr.requestMs) {
+      tr.requestMs = now;
+      traceUpdate = { traceId, phase: "request", requestMs: now };
+    }
+
+    if (evtType === "FLIGHT_PLAN_FILED") {
+      if (tr && !tr.filedMs) {
+        tr.filedMs = now;
+        traceUpdate = { traceId, phase: "filed", filedMs: now };
+      }
+      if (fpId) {
+        const tc    = payload.tcSchedule || null;
+        const route = payload.route      || {};
+        const dur   = tc?.arrivalAbsMs && tc?.actualDepartAbsMs
+          ? Math.round((tc.arrivalAbsMs - tc.actualDepartAbsMs) / 1000)
+          : null;
+        const plan = {
+          fpId,
+          who:       src || "?",
+          from:      tc?.from || (route.start ? route.start.join(",") : "?"),
+          to:        tc?.to   || (route.end   ? route.end.join(",")   : "?"),
+          durationSec: dur,
+          traceId,
+          filedMs:   now,
+        };
+        activePlans.set(fpId, plan);
+        planAdd = plan;
+      }
+    }
+
+    if (evtType === "FLIGHT_PLAN_COMPLETED") {
+      if (tr && !tr.completedMs) {
+        tr.completedMs = now;
+        tr.done = true;
+        traceUpdate = { traceId, phase: "completed", completedMs: now };
+      }
+      if (fpId) { activePlans.delete(fpId); planRemove = fpId; }
     }
   }
 
-  // SLA: utm/notify/# に FLIGHT_PLAN_FILED が来たら到着時刻を記録
-  if (topic.startsWith("utm/notify/") && evtType === "FLIGHT_PLAN_FILED" && fpId) {
-    const rec = slaBuffer.find((s) => s.flightPlanId === fpId && s.notifyMs === null);
-    if (rec) {
-      rec.notifyMs = Date.now();
-      rec.delayMs = rec.notifyMs - rec.filedMs;
+  // --- utm/notify/# (FIMS→UASSP) ---
+  if (topic.startsWith("utm/notify/")) {
+    if (evtType === "FLIGHT_PLAN_ASSIGNED" && tr && !tr.assignedMs) {
+      tr.assignedMs = now;
+      traceUpdate = { traceId, phase: "assigned", assignedMs: now };
+    }
+
+    if (evtType === "FLIGHT_PLAN_FILED" && tr && !tr.notifyMs) {
+      tr.notifyMs = now;
+      traceUpdate = { traceId, phase: "notify", notifyMs: now };
+    }
+
+    if (evtType === "PLAN_REJECTED") {
+      const reason = payload.reason || "(unknown)";
+      rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
+      if (tr && !tr.rejectedMs) {
+        tr.rejectedMs = now;
+        tr.reason     = reason;
+        tr.done       = true;
+        traceUpdate   = { traceId, phase: "rejected", rejectedMs: now, reason };
+      }
+      if (fpId) { activePlans.delete(fpId); planRemove = fpId; }
+    }
+
+    // SEGMENT_CONFLICT_GUARD イベント
+    if (evtType === "EVENT" && payload?.type === "SEGMENT_CONFLICT_GUARD") {
+      const subj = payload.subject || {};
+      const det  = payload.details || {};
+      const conf = {
+        ts:  now,
+        fpId: subj.flightPlanId || "(unknown)",
+        who:  subj.who || "?",
+        traceId,
+        conflictsWith: (det.conflictsWith || []).map(c => ({
+          fpId: c.fpId,
+          who:  c.who,
+          edges: (c.details || []).map(d => ({
+            edgeId:    d.edgeId,
+            overlapMs: (d.a && d.b)
+              ? Math.max(0, Math.min(d.a.tEndAbsMs, d.b.tEndAbsMs)
+                          - Math.max(d.a.tStartAbsMs, d.b.tStartAbsMs))
+              : null,
+          })),
+        })),
+      };
+      conflictLog.push(conf);
+      if (conflictLog.length > MAX_CONFLICTS) conflictLog.shift();
+      conflictAdd = conf;
     }
   }
 
   // ブラウザへブロードキャスト
-  broadcast({ type: "mqtt", topic, envelope });
+  broadcast({
+    type: "mqtt",
+    entry,
+    traceUpdate,
+    planAdd,
+    planRemove,
+    conflictAdd,
+    sla:          computeSla(),
+    rejectReasons: { ...rejectReasons },
+    stats:        currentState().stats,
+  });
 });
 
-// --- WebSocket 接続ハンドラ ---
-wss.on("connection", (ws) => {
-  console.log("[UI] browser connected");
-
-  // 接続直後に現在のタイムラインを送る
-  const delays = slaBuffer.map((s) => s.delayMs).filter((d) => d != null).sort((a, b) => a - b);
-  const n = delays.length;
-  ws.send(JSON.stringify({
-    type: "init",
-    timeline: timeline.slice(-50),
-    sla: {
-      count: n,
-      p50: n > 0 ? delays[Math.floor(n * 0.5)] : null,
-      p95: n > 0 ? delays[Math.floor(n * 0.95)] : null,
-    },
-  }));
-
-  ws.on("error", (e) => console.error("[UI WS ERROR]", e.message));
-});
-
-// --- 起動 ---
 httpServer.listen(PORT, () => {
   console.log(`[UI] Dashboard: http://localhost:${PORT}`);
 });

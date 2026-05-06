@@ -74,9 +74,11 @@ def make_plan(route_pair, flight_idx):
     }
 
 
-def submit_and_complete(uassp_url, plan, flight_idx, label):
+def submit_and_complete(uassp_url, plan, flight_idx, label, wait_sec=5.0):
     """
-    フライトを申請し、完了通知まで送る。
+    フライトを申請し、wait_sec 秒後に完了通知を送る。
+    wait_sec: FIMS の ASSIGNED→FILED サイクルが完了するまでの待機時間。
+              0 だと COMPLETED が先着して FILED が孤立するため最低 3 秒推奨。
     戻り値: dict with flightPlanId, traceId, delayMs, label, uassp, ok, error
     """
     result = {
@@ -112,6 +114,12 @@ def submit_and_complete(uassp_url, plan, flight_idx, label):
         result["assignedMs"]   = t1
         result["delayMs"]      = t1 - t0
 
+        # FIMS の ASSIGNED→FILED サイクルを待つ
+        # 即座に /api/completed を呼ぶと COMPLETED が FILED より先に FIMS へ届き
+        # FILED_WITHOUT_PENDING になって activePlans に積まれない
+        if wait_sec > 0:
+            time.sleep(wait_sec)
+
         # 完了通知
         try:
             cr = requests.post(
@@ -122,7 +130,7 @@ def submit_and_complete(uassp_url, plan, flight_idx, label):
             cr.raise_for_status()
         except Exception as e:
             result["error"] = f"completed failed: {e}"
-            result["ok"] = True  # 申請は成功しているので ok=True
+            result["ok"] = True  # 申請自体は成功
             return result
 
         result["ok"] = True
@@ -133,8 +141,8 @@ def submit_and_complete(uassp_url, plan, flight_idx, label):
         return result
 
 
-def run_experiment(flights, interval, uassp_a, uassp_b, out_path):
-    print(f"=== 実験開始: {flights}機 {interval}秒間隔 ===")
+def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path):
+    print(f"=== 実験開始: {flights}機 {interval}秒間隔 / 完了待機 {wait_sec}秒 ===")
     print(f"  UASSP_A: {uassp_a}")
     print(f"  UASSP_B: {uassp_b}")
     print(f"  出力: {out_path}")
@@ -155,7 +163,7 @@ def run_experiment(flights, interval, uassp_a, uassp_b, out_path):
     def worker(uassp_url, plan, flight_idx, label, seq):
         # interval に従ってずらして送信
         time.sleep(seq * interval)
-        r = submit_and_complete(uassp_url, plan, flight_idx, label)
+        r = submit_and_complete(uassp_url, plan, flight_idx, label, wait_sec=wait_sec)
         with lock:
             results.append(r)
             status = "OK" if r["ok"] else f"ERR:{r['error']}"
@@ -205,7 +213,10 @@ def main():
     ap.add_argument("--flights",   type=int,   default=5,
                     help="フライト数（UASSP_A + B それぞれに申請）")
     ap.add_argument("--interval",  type=float, default=2.0,
-                    help="フライト間隔(秒)")
+                    help="フライト送信間隔(秒)")
+    ap.add_argument("--wait",      type=float, default=5.0,
+                    help="申請後 /api/completed を呼ぶまでの待機時間(秒)。"
+                         "FIMS の ASSIGNED→FILED サイクルより長く設定すること")
     ap.add_argument("--uassp-a",   default="http://localhost:4001",
                     help="UASSP_A の URL")
     ap.add_argument("--uassp-b",   default="http://localhost:4002",
@@ -217,6 +228,7 @@ def main():
     run_experiment(
         flights=args.flights,
         interval=args.interval,
+        wait_sec=args.wait,
         uassp_a=args.uassp_a,
         uassp_b=args.uassp_b,
         out_path=args.out,

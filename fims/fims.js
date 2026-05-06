@@ -1420,7 +1420,12 @@ async function handleEvent(envelope, mqttClient) {
       altMin: route.altMin,
       altMax: route.altMax,
       tcSchedule: filedTc,
-      expireAtMs: filedTc?.arrivalAbsMs ?? Date.now() + 3600000, // TCの到着時刻を期限とする
+      // T0_EPOCH_MS が過去日付の場合 arrivalAbsMs も過去になるため、
+      // 現在時刻+60秒 を下限にして即掃除されないよう保護する
+      expireAtMs: Math.max(
+        filedTc?.arrivalAbsMs ?? 0,
+        Date.now() + 60000
+      ),
     };
 
     const pendingTc = pending?.tcSchedule || null;
