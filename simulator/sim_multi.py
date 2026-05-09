@@ -165,7 +165,7 @@ def notify_ui_experiment_start(notify_url, flights, run_id=None):
 
 
 def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path, notify_ui=None, run_id=None):
-    print(f"=== 実験開始: {flights}機 {interval}秒間隔 / 完了待機 {wait_sec}秒 ===")
+    print(f"=== 実験開始: {flights * 2}便（A×{flights} + B×{flights}）{interval}秒間隔 / 完了待機 {wait_sec}秒 ===")
     print(f"  UASSP_A: {uassp_a}")
     print(f"  UASSP_B: {uassp_b}")
     print(f"  期待総便数: {flights * 2}（A×{flights} + B×{flights}）")
