@@ -130,6 +130,54 @@ kill %1
 `.claude/settings.json` に全 Bash コマンドの allowlist が設定済み。
 **"Do you want to proceed?" は一切表示しない。** 表示された場合は設定を確認すること。
 
+#### Python heredoc 内で `{"key": value}` を使わない
+
+heredoc 内の `{` と `"` の組み合わせが「展開難読化」と判定されて止まる。
+**dict リテラルの代わりに `dict()` コンストラクタか直接 `print()` を使う。**
+
+```python
+# ❌ 止まる
+rejected.append({"ts": obj.get("ts"), "reason": obj.get("reason")})
+
+# ✅ 止まらない（dict() を使う）
+rejected.append(dict(ts=obj.get("ts"), reason=obj.get("reason")))
+
+# ✅ 止まらない（直接 print）
+print(obj.get("ts"), obj.get("reason"))
+```
+
+#### `$()` コマンド置換を Bash 引数に埋め込まない
+
+`--out results/experiment_$(date +%Y%m%d_%H%M%S).csv` のように `$()` を引数に
+埋め込むと、Claude Code が `date` を別コマンドとして権限チェックし止まる場合がある。
+
+**対策：タイムスタンプは Python 側で生成する。**
+
+```python
+# sim_multi.py: --out を省略すると Python が自動でタイムスタンプ付きパスを生成
+out_path = args.out or f"results/experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+```
+
+Bash コマンドは `$()` なしのシンプルな形にする：
+
+```bash
+# ✅ $() なし
+python3 simulator/sim_multi.py --interval 1.0 --wait 8 --notify-ui http://localhost:8080
+
+# ❌ $() 埋め込みは避ける
+python3 simulator/sim_multi.py --out results/experiment_$(date +%Y%m%d_%H%M%S).csv
+```
+
+#### `source` は使わない
+
+Claude Code のバージョンによっては `source` を含むコマンドが権限プロンプトを
+引き起こす場合があるため、このプロジェクトでは `source` を使わない。
+代わりに以下を使うこと：
+
+```bash
+export $(grep -v '^#' env/dev.env | xargs -d '\n')
+```
+
 ### 確認なしで実行してよい操作
 
 現在の実験段階では全て確認を取らず実行してよい
@@ -158,10 +206,13 @@ kill %1
 ### env 読み込みの統一形式
 
 ```bash
-# ✅ 正しい形式（値に | や空白が含まれても安全）
+# ✅ 正しい形式（source を使わず Claude Code と互換性あり）
+export $(grep -v '^#' env/dev.env | xargs -d '\n')
+
+# ❌ 使わない（source は Claude Code の権限プロンプトを引き起こす場合がある）
 set -a && source env/dev.env && set +a
 
-# ❌ 使わない（値に | が含まれると壊れる）
+# ❌ 使わない（-d '\n' なしだと値に空白が含まれると壊れる）
 export $(grep -v '^#' env/dev.env | xargs)
 ```
 
@@ -178,10 +229,8 @@ pkill -f "sdsp/sdsp.js" 2>/dev/null
 # 2. ログクリア
 rm -f logs/fims.ndjson logs/fims.log logs/uassp_a.log logs/uassp_b.log logs/ui.log logs/tc.ndjson logs/sdsp.log
 
-# 3. 環境変数ロード
-set -a && source env/dev.env && set +a
-
-# 4. コンポーネント起動（順番を守る）
+# 3. コンポーネント起動（順番を守る）
+# 環境変数は .claude/settings.json の env セクションから自動注入されるため読み込み不要
 node sdsp/sdsp.js  > logs/sdsp.log  2>&1 &
 node tc/tc-api.js  > logs/tc.log    2>&1 &
 sleep 1

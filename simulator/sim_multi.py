@@ -128,6 +128,16 @@ def submit_and_complete(uassp_url, plan, flight_idx, label, wait_sec=5.0):
                 timeout=5,
             )
             cr.raise_for_status()
+            cr_json = cr.json()
+
+            # ignored: true = UASSP がプランを知らない
+            # → FIMS に PLAN_REJECTED (NO_SLOT_IN_WINDOW 等) を受け取って
+            #   plansById から削除済み。飛行は成立していない。
+            if cr_json.get("ignored"):
+                result["ok"]    = False
+                result["error"] = f"REJECTED_BY_FIMS (UASSP had no record: {cr_json})"
+                return result
+
         except Exception as e:
             result["error"] = f"completed failed: {e}"
             result["ok"] = True  # 申請自体は成功
@@ -238,7 +248,7 @@ def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path, noti
 
 def main():
     ap = argparse.ArgumentParser(description="UTM 比較実験スクリプト")
-    ap.add_argument("--flights",    type=int,   default=5,
+    ap.add_argument("--flights",    type=int,   default=10,
                     help="フライト数（UASSP_A + B それぞれに申請。総便数 = N×2）")
     ap.add_argument("--interval",   type=float, default=2.0,
                     help="フライト送信間隔(秒)")
@@ -252,12 +262,15 @@ def main():
                     help="UIサーバーURL（実験開始通知 + expectedTotal 送信先）")
     ap.add_argument("--run-id",     default=None,
                     help="実験ID（省略時は env/dev.env の RUN_ID を使用）")
-    ap.add_argument("--out",        default="results/experiment.csv",
-                    help="CSV 出力先パス")
+    ap.add_argument("--out",        default=None,
+                    help="CSV 出力先パス（省略時は results/experiment_YYYYMMDD_HHMMSS.csv）")
     args = ap.parse_args()
 
     import os
     run_id = args.run_id or os.environ.get("RUN_ID", None)
+
+    # --out 省略時は Python 側でタイムスタンプを生成（シェルの $() 置換を使わない）
+    out_path = args.out or f"results/experiment_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
 
     run_experiment(
         flights=args.flights,
@@ -265,7 +278,7 @@ def main():
         wait_sec=args.wait,
         uassp_a=args.uassp_a,
         uassp_b=args.uassp_b,
-        out_path=args.out,
+        out_path=out_path,
         notify_ui=args.notify_ui,
         run_id=run_id,
     )

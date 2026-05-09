@@ -236,6 +236,8 @@ table.sla td{padding:3px 8px;border-bottom:1px solid var(--bd)}
       FILED_WITHOUT_PENDING = ASSIGNED前にFILED<br>
       FILED_AFTER_TIMEOUT &nbsp;= ASSIGNED期限切れ<br>
       SEGMENT_CONFLICT &nbsp;&nbsp;= segment衝突(reject時)<br>
+      NO_SLOT_IN_WINDOW = TCスロット競合（正常動作）<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;高密度実験で発生。--interval拡大で軽減<br>
       <br>
       <b style="color:var(--text)">total の意味</b><br>
       UIサーバー補足済みtrace数<br>
@@ -605,8 +607,16 @@ function renderHints(sla, ex) {
       hints.push({ lv:"warn", msg:`FILED→NOTIFY P95=${s.filedToNotify.p95}ms: FIMS判定+署名+notifyが遅延` });
     if (s.reqToDone?.p95 && s.reqToDone.p95 < 100)
       hints.push({ lv:"warn", msg:`REQ→DONE P95=${s.reqToDone.p95}ms: --wait が短すぎる可能性。ACTIVE_ADD数を確認` });
-    if (s.reqToReject?.count > 0)
-      hints.push({ lv:"info", msg:`拒否 ${s.reqToReject.count}便: Rejected Flights パネルで理由を確認` });
+    if (s.reqToReject?.count > 0) {
+      // NO_SLOT_IN_WINDOW は TC の正常動作（混雑時のスロット競合）なので info 扱い
+      const noSlot = Object.entries(state.rejectReasons).find(([r]) => r === "NO_SLOT_IN_WINDOW");
+      if (noSlot) {
+        hints.push({ lv:"info", msg:`NO_SLOT_IN_WINDOW ${noSlot[1]}件: TCスロット競合（正常動作）。高密度実験では発生する。--interval を広げると減少` });
+      }
+      const otherCount = s.reqToReject.count - (noSlot ? noSlot[1] : 0);
+      if (otherCount > 0)
+        hints.push({ lv:"warn", msg:`その他拒否 ${otherCount}便: Rejected Flights パネルで理由を確認` });
+    }
   }
 
   const cfCount = state.conflicts.length;
@@ -627,6 +637,7 @@ function renderHints(sla, ex) {
 
 // ── Rejected Flights（trace単位の拒否一覧）──
 const REASON_SHORT = {
+  NO_SLOT_IN_WINDOW:           "TCスロット競合（正常動作）",
   TC_REJECT:                   "TCルート計算失敗",
   TC_ROUTE_GEO_MAPPING_FAILED: "座標→ノード変換失敗",
   TC_ROUTE_GEO_INPUT_INPUT_INVALID: "座標値不正",
