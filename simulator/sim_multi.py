@@ -151,21 +151,26 @@ def submit_and_complete(uassp_url, plan, flight_idx, label, wait_sec=5.0):
         return result
 
 
-def notify_ui_experiment_start(notify_url, flights, run_id=None):
+def notify_experiment_start(notify_ui_url, notify_tc_url, flights, run_id=None):
     """
-    UIサーバーに実験開始を通知し、expectedTotal を伝える。
-    UIサーバーが未起動でも実験は続行する（エラーは警告のみ）。
+    実験開始前に UI サーバーと TC の両方に通知する。
+    - UI: expectedTotal を伝えて capture 率計測を有効化
+    - TC: edgeUsage をクリアして前実験のスロット予約を消去
+          呼ばないと同じスロット帯で NO_SLOT_IN_WINDOW が再発する
+    どちらも未起動でも実験は続行する（エラーは警告のみ）。
     """
     expected = flights * 2  # UASSP_A + UASSP_B
+
+    # UI サーバーに通知
     try:
         r = requests.post(
-            f"{notify_url}/api/experiment/start",
-            json={
-                "expectedTotal":   expected,
-                "flightsPerUassp": flights,
-                "uasspCount":      2,
-                "runId":           run_id,
-            },
+            f"{notify_ui_url}/api/experiment/start",
+            json=dict(
+                expectedTotal=expected,
+                flightsPerUassp=flights,
+                uasspCount=2,
+                runId=run_id,
+            ),
             timeout=3,
         )
         r.raise_for_status()
@@ -173,17 +178,34 @@ def notify_ui_experiment_start(notify_url, flights, run_id=None):
     except Exception as e:
         print(f"  UI通知スキップ（UIサーバー未起動 or 到達不可）: {e}")
 
+    # TC の edgeUsage をリセット（前実験のスロット予約を消去）
+    try:
+        r = requests.post(
+            f"{notify_tc_url}/reset",
+            json=dict(reason="experiment_start"),
+            timeout=3,
+        )
+        r.raise_for_status()
+        print(f"  TC edgeUsage リセット完了")
+    except Exception as e:
+        print(f"  TC リセットスキップ（TC未起動 or 到達不可）: {e}")
 
-def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path, notify_ui=None, run_id=None):
+
+def run_experiment(flights, interval, wait_sec, uassp_a, uassp_b, out_path,
+                   notify_ui=None, notify_tc=None, run_id=None):
     print(f"=== 実験開始: {flights * 2}便（A×{flights} + B×{flights}）{interval}秒間隔 / 完了待機 {wait_sec}秒 ===")
     print(f"  UASSP_A: {uassp_a}")
     print(f"  UASSP_B: {uassp_b}")
     print(f"  期待総便数: {flights * 2}（A×{flights} + B×{flights}）")
     print(f"  出力: {out_path}")
 
-    # UIサーバーに実験開始を通知（expectedTotal を渡す）
-    if notify_ui:
-        notify_ui_experiment_start(notify_ui, flights, run_id)
+    # UI と TC に実験開始を通知（UI: expectedTotal、TC: edgeUsage リセット）
+    notify_experiment_start(
+        notify_ui_url=notify_ui or "http://localhost:8080",
+        notify_tc_url=notify_tc or "http://localhost:4100",
+        flights=flights,
+        run_id=run_id,
+    )
 
     os.makedirs(os.path.dirname(out_path) if os.path.dirname(out_path) else ".", exist_ok=True)
 
@@ -260,6 +282,8 @@ def main():
                     help="UASSP_B の URL")
     ap.add_argument("--notify-ui",  default="http://localhost:8080",
                     help="UIサーバーURL（実験開始通知 + expectedTotal 送信先）")
+    ap.add_argument("--notify-tc",  default="http://localhost:4100",
+                    help="TCサーバーURL（edgeUsage リセット送信先）")
     ap.add_argument("--run-id",     default=None,
                     help="実験ID（省略時は env/dev.env の RUN_ID を使用）")
     ap.add_argument("--out",        default=None,
@@ -280,6 +304,7 @@ def main():
         uassp_b=args.uassp_b,
         out_path=out_path,
         notify_ui=args.notify_ui,
+        notify_tc=args.notify_tc,
         run_id=run_id,
     )
 
