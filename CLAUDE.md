@@ -69,6 +69,32 @@ tree -L 3 -I "node_modules|logs"
 
 ---
 
+## TC スロット探索の調整
+
+### MAX_DEPART_DELAY_SEC
+
+TC がスロットを探す最大待機時間（秒）。
+
+| 設定箇所 | 値 |
+|---|---|
+| `.claude/settings.json` の `env` セクション | `"MAX_DEPART_DELAY_SEC": "10"` |
+| `env/dev.env` | `MAX_DEPART_DELAY_SEC=10` |
+
+**動作：** 希望出発時刻から N 秒以内に空きスロットが見つからなければ `NO_SLOT_IN_WINDOW` で拒否。
+
+```bash
+# 例：窓を30秒に広げる（混雑耐性を上げる）
+# .claude/settings.json の env セクションを変更してTCを再起動
+"MAX_DEPART_DELAY_SEC": "30"
+```
+
+**注意：**
+- 大きくすると拒否が減る代わりに出発遅延が増える
+- `NO_SLOT_IN_WINDOW` は正常な TC 動作。高密度実験では発生を許容する
+- 迂回ルートの探索は現時点で未実装（STEP13c で対応予定）
+
+---
+
 ## 既知の設計上の注意事項
 
 ### traceId の設計
@@ -205,16 +231,22 @@ export $(grep -v '^#' env/dev.env | xargs -d '\n')
 
 ### env 読み込みの統一形式
 
+`.claude/settings.json` の `env` セクションはバックグラウンドプロセス（`node ... &`）への
+注入が保証されないため、スクリプト内で明示的に読み込む。
+
+`bin/run-experiment.sh` では以下の方式を使用（インラインコメントも安全に除去できる）：
+
 ```bash
-# ✅ 正しい形式（source を使わず Claude Code と互換性あり）
-export $(grep -v '^#' env/dev.env | xargs -d '\n')
-
-# ❌ 使わない（source は Claude Code の権限プロンプトを引き起こす場合がある）
-set -a && source env/dev.env && set +a
-
-# ❌ 使わない（-d '\n' なしだと値に空白が含まれると壊れる）
-export $(grep -v '^#' env/dev.env | xargs)
+while IFS='=' read -r key val; do
+  [[ -z "$key" || "$key" == \#* ]] && continue
+  val="${val%%#*}"
+  val="${val%"${val##*[! ]}"}"
+  export "$key=$val"
+done < env/dev.env
 ```
+
+Claude Code の Bash ツールから直接コマンドを叩く場合（バックグラウンドなし）は
+`settings.json` の `env` が注入される。
 
 ### 実験実行の標準手順
 

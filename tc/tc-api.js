@@ -189,5 +189,6 @@ app.listen(PORT, () => {
     port: PORT,
     runId: process.env.RUN_ID || null,
     t0EpochMs: Number(process.env.T0_EPOCH_MS) || null,
+    maxDepartDelaySec: Number(process.env.MAX_DEPART_DELAY_SEC ?? 10),
   });
 });

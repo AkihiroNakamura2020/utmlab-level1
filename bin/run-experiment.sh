@@ -13,9 +13,8 @@
 #                  COMPLETED が FILED より先着し ACTIVE_ADD が失敗する。
 #
 # 注意:
-#   環境変数は .claude/settings.json の env セクションから自動注入される。
-#   スタンドアロン実行（Claude Code 外）の場合は以下を先に実行すること:
-#     export $(grep -v '^#' env/dev.env | xargs -d '\n')
+#   .claude/settings.json の env セクションはバックグラウンドプロセスへの
+#   注入が保証されないため、スクリプト内で明示的に export している。
 #
 # 例:
 #   ./bin/run-experiment.sh                    # 10便×2=20便、間隔1秒
@@ -42,6 +41,15 @@ echo "=== 実験開始 ==="
 echo "  便数: ${TOTAL}便（UASSP_A×${FLIGHTS} + UASSP_B×${FLIGHTS}）"
 echo "  送信間隔: ${INTERVAL}秒 / 完了待機: ${WAIT}秒"
 echo "  出力ファイル: sim_multi.py が自動でタイムスタンプ付きCSVを生成"
+
+# ── 環境変数読み込み（子プロセスに確実に渡すため明示的に export）──
+# inline comment を含む行はパースに失敗するため grep で除外する
+while IFS='=' read -r key val; do
+  [[ -z "$key" || "$key" == \#* ]] && continue
+  val="${val%%#*}"   # インラインコメントを除去
+  val="${val%"${val##*[! ]}"}"  # 末尾スペースを除去
+  export "$key=$val"
+done < env/dev.env
 
 # ── ディレクトリ準備 ──
 mkdir -p results logs
